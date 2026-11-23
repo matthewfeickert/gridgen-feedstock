@@ -58,44 +58,56 @@ for function in (
     function.argtypes = [ctypes.c_void_p]
 library.gridnodes_destroy.restype = None
 
+
+def generate_nodes(boundary, beta, nx, ny, xgrid=None, ygrid=None):
+    """Generate a grid with gridgen_generategrid2 and return its nodes.
+
+    Without xgrid and ygrid, the nodes are an nx by ny grid. With them, the
+    nodes are the nx * ny points (xgrid, ygrid) of the unit square of the image
+    region, as pygridgen.Focus passes them.
+    """
+    nbdry = len(boundary)
+    DoubleArray = ctypes.c_double * nbdry
+    ngrid = 0 if xgrid is None else nx * ny
+    GridArray = ctypes.c_double * ngrid
+    nodes = library.gridgen_generategrid2(
+        nbdry,
+        DoubleArray(*(x for x, _ in boundary)),
+        DoubleArray(*(y for _, y in boundary)),
+        DoubleArray(*beta),
+        0,  # ul: index of the upper-left corner
+        nx,
+        ny,
+        ngrid,
+        None if xgrid is None else GridArray(*xgrid),
+        None if ygrid is None else GridArray(*ygrid),
+        14,  # nnodes
+        1,  # newton
+        1e-12,  # precision
+        1,  # checksimplepoly
+        1,  # thin
+        3,  # nppe
+        0,  # verbose
+        # nsigmas, sigmas, nrect, xrect, yrect: outputs that are not checked
+        ctypes.byref(ctypes.c_int(0)),
+        ctypes.byref(c_double_p()),
+        ctypes.byref(ctypes.c_int(0)),
+        ctypes.byref(c_double_p()),
+        ctypes.byref(c_double_p()),
+    )
+    assert nodes, "gridgen_generategrid2 returned NULL"
+    # gridnodes stores the nodes contiguously, row after row
+    xs = library.gridnodes_getx(nodes)[0]
+    ys = library.gridnodes_gety(nodes)[0]
+    points = [(xs[i], ys[i]) for i in range(nx * ny)]
+    library.gridnodes_destroy(nodes)
+    return points
+
+
 boundary = [(0.0, 0.0), (2.0, 0.0), (2.0, 1.0), (0.0, 1.0)]
-nbdry = len(boundary)
 nx, ny = 41, 21
-DoubleArray = ctypes.c_double * nbdry
-nsigmas = ctypes.c_int(0)
-sigmas = c_double_p()
-nrect = ctypes.c_int(0)
-xrect = c_double_p()
-yrect = c_double_p()
-nodes = library.gridgen_generategrid2(
-    nbdry,
-    DoubleArray(*(x for x, _ in boundary)),
-    DoubleArray(*(y for _, y in boundary)),
-    DoubleArray(*([1.0] * nbdry)),  # beta: four 90 degree corners
-    0,  # ul: index of the upper-left corner
-    nx,
-    ny,
-    0,  # ngrid: no focusing
-    None,
-    None,
-    14,  # nnodes
-    1,  # newton
-    1e-12,  # precision
-    1,  # checksimplepoly
-    1,  # thin
-    3,  # nppe
-    0,  # verbose
-    ctypes.byref(nsigmas),
-    ctypes.byref(sigmas),
-    ctypes.byref(nrect),
-    ctypes.byref(xrect),
-    ctypes.byref(yrect),
-)
-assert nodes, "gridgen_generategrid2 returned NULL"
-# gridnodes stores the nodes contiguously, row after row
-xs = library.gridnodes_getx(nodes)[0]
-ys = library.gridnodes_gety(nodes)[0]
-points = [(xs[i], ys[i]) for i in range(nx * ny)]
+# beta: four 90 degree corners
+points = generate_nodes(boundary, [1.0] * 4, nx, ny)
 assert all(math.isfinite(x) and math.isfinite(y) for x, y in points)
 assert all(-1e-9 <= x <= 2.0 + 1e-9 and -1e-9 <= y <= 1.0 + 1e-9 for x, y in points)
 corners = [points[i] for i in (0, nx - 1, (ny - 1) * nx, nx * ny - 1)]
@@ -105,7 +117,24 @@ for x_expected, y_expected in boundary:
         and math.isclose(y, y_expected, abs_tol=1e-6)
         for x, y in corners
     ), corners
-library.gridnodes_destroy(nodes)
+
+# The boundary of pygridgen's grid tests (pygridgen 0.3.0 tests/test_grid.py)
+# splits into more than one quadrilateral, so map_quadrilaterals looks up its
+# internal edges, which crashed with -DNDEBUG before
+# patches/do-not-insert-into-hash-table-inside-assert.patch. Also cover the
+# focused (ngrid > 0) path that pygridgen uses.
+pentagon = [(0.0, 0.0), (1.0, 0.0), (2.0, 0.5), (1.0, 1.0), (0.0, 1.0)]
+nx, ny = 5, 10
+focus_x = [i / (nx - 1) for j in range(ny) for i in range(nx)]
+focus_y = [j / (ny - 1) for j in range(ny) for i in range(nx)]
+for xgrid, ygrid in ((None, None), (focus_x, focus_y)):
+    points = generate_nodes(pentagon, [1.0, 1.0, 0.0, 1.0, 1.0], nx, ny, xgrid, ygrid)
+    # Nodes outside the polygon are NaN, so only check the others.
+    inside = [(x, y) for x, y in points if math.isfinite(x) and math.isfinite(y)]
+    assert inside, points
+    assert all(
+        -1e-9 <= x <= 2.0 + 1e-9 and -1e-9 <= y <= 1.0 + 1e-9 for x, y in inside
+    ), inside
 
 # Exercise Triangle and complex arithmetic with a small rectangular grid.
 with tempfile.TemporaryDirectory() as directory:
